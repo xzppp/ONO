@@ -40,7 +40,7 @@ def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
 
 def orthogonal_qr(x):
     # shape = x.shape
-    #reshaped_x = x.reshape(-1, shape[-2], shape[-1])
+    # reshaped_x = x.reshape(-1, shape[-2], shape[-1])
     Q, _ = torch.linalg.qr(x,mode='reduced')  # 使用 PyTorch 的 QR 分解函数
     return Q
 
@@ -128,22 +128,22 @@ class ONOBlock(nn.Module):
         y = self.mlp(y)
         x = x + y
         
-        if self.ortho :
-            x = orthogonal_qr(x)
+        x_ = orthogonal_qr(x)  if self.ortho else x
         #fx = fx.view(fx.shape[0],fx.shape[1],1)
-        fx = torch.matmul(x,torch.matmul(x.transpose(-2,-1),fx))
+        fx = torch.matmul(x_,torch.matmul(x_.transpose(-2,-1),fx))
         fx = self.act(fx)
     
         return x , fx
 
 
+
 class ONO(nn.Module):
     def __init__(self,
                  space_dim=2,
-                 n_layers=5,
-                 n_hidden=64,
-                 ffn_dropout=0.1,
-                 attn_dropout=0.1,
+                 n_layers=12,
+                 n_hidden=256,
+                 ffn_dropout=0.0,
+                 attn_dropout=0.0,
                  n_head=8,
                  Time_Input = False,
                  ortho = False,
