@@ -38,6 +38,12 @@ def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
     return embedding
 
 
+def orthogonal_qr(x):
+    # shape = x.shape
+    #reshaped_x = x.reshape(-1, shape[-2], shape[-1])
+    Q, _ = torch.linalg.qr(x,mode='reduced')  # 使用 PyTorch 的 QR 分解函数
+    return Q
+
 def orthogonal_tensor(X):
     n, k = X.size(-2), X.size(-1)
     transposed = n < k
@@ -76,7 +82,8 @@ class ONOBlock(nn.Module):
         attention_dropout: float,
         #head_dim: int,
         norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
-        ortho = False
+        ortho = False,
+        act = 'gelu'
     ):
         super().__init__()
 
@@ -91,10 +98,12 @@ class ONOBlock(nn.Module):
         self.mlp = MLPBlock(hidden_dim, hidden_dim, dropout)
 
         self.attn = LinearSelfAttention(hidden_dim, causal = False, heads = num_heads, dim_head = hidden_dim // num_heads)
-        
-        self.act = nn.Sigmoid()
+        if act == 'gelu':
+            self.act = nn.GELU()
+        else:
+            self.act = nn.Sigmoid()
 
-        #self.initialize_weights()
+        self.initialize_weights()
     
     def initialize_weights(self):
         self.apply(self._init_weights)
@@ -120,9 +129,9 @@ class ONOBlock(nn.Module):
         x = x + y
         
         if self.ortho :
-            x = orthogonal_tensor(x)
+            x = orthogonal_qr(x)
         #fx = fx.view(fx.shape[0],fx.shape[1],1)
-        fx = torch.matmul(torch.matmul(x,x.transpose(-2,-1)),fx)
+        fx = torch.matmul(x,torch.matmul(x.transpose(-2,-1),fx))
         fx = self.act(fx)
     
         return x , fx
@@ -133,15 +142,15 @@ class ONO(nn.Module):
                  space_dim=2,
                  n_layers=5,
                  n_hidden=64,
-                 ffn_dropout=0,
-                 attn_dropout=0,
+                 ffn_dropout=0.1,
+                 attn_dropout=0.1,
                  n_head=8,
                  Time_Input = False,
                  ortho = False,
+                 act = 'gelu',
                  #n_experts = 2,
                  #n_inner = 4,
                  #attn_type='linear',
-                 #act = 'gelu',
                  ):
         super(ONO, self).__init__()
 
@@ -150,7 +159,7 @@ class ONO(nn.Module):
         
         self.preprocess = nn.Linear(space_dim , n_hidden)
 
-        self.blocks = nn.Sequential(*[ONOBlock(num_heads = n_head, hidden_dim= n_hidden, dropout= ffn_dropout, attention_dropout= attn_dropout , ortho = ortho) for _ in range(n_layers)])
+        self.blocks = nn.Sequential(*[ONOBlock(num_heads = n_head, hidden_dim= n_hidden, dropout= ffn_dropout, attention_dropout= attn_dropout , ortho = ortho , act = act) for _ in range(n_layers)])
         self.blocks[-1].act=nn.Identity()
         
         # self.apply(self._init_weights)
