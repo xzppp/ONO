@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader, Dataset
 from ONOmodel import ONO
 from timeit import default_timer
 from tqdm import *
-from testloss import testLoss
+from testloss import TestLoss
 
 data_path = './burgers_data_R10.mat'
 
@@ -20,12 +20,14 @@ class BurgerDataset(Dataset):
                  train_data = True,
                  train_len = 1000,
                  test_len = 100,
+                 sub = 1
                  ):
         self.data_path = data_path
-        self.n_grid = n_grid
+        self.n_grid = n_grid//sub
         self.train_data = train_data
         self.train_len = train_len
         self.test_len = test_len
+        self.sub = sub
         
         if self.data_path is not None:
             self._initialize()
@@ -34,8 +36,8 @@ class BurgerDataset(Dataset):
         
         data = scio.loadmat(self.data_path)
         
-        self.a = data['a']
-        self.u = data['u']
+        self.a = data['a'][:,::self.sub]
+        self.u = data['u'][:,::self.sub]
         del data
         gc.collect()
 
@@ -62,25 +64,29 @@ class BurgerDataset(Dataset):
                     u = u.float())
         
 batch_size = 10
-learning_rate = 0.0001
-epochs = 5
-step_size = 100
-gamma = 0.5    
+learning_rate = 0.001
+epochs = 100
 ntrain = 1000
 ntest = 100
 
+sub = 2**5 #subsampling rate
+h = 2**13 // sub #total grid size divided by the subsampling rate
+s = h
+
 def main():
-    train_dataset = BurgerDataset(data_path = data_path, train_data = True)
-    test_dataset = BurgerDataset(data_path = data_path, train_data = False)
+    train_dataset = BurgerDataset(data_path = data_path, train_len=ntrain,train_data = True, sub = sub)
+    test_dataset = BurgerDataset(data_path = data_path, test_len=ntest,train_data = False, sub = sub)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     
     print('dataloading is over')
     
-    model = ONO(space_dim=1, ortho= True).cuda()
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
-    myloss = torch.nn.MSELoss()
+    model = ONO(space_dim=1, ortho= True, n_hidden=128,res = s).cuda()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    myloss = TestLoss(size_average=False)
+    
+    print('s = {}'.format(s))
     
     for ep in tqdm(range(epochs)):
 
@@ -90,10 +96,11 @@ def main():
   
         for data in train_loader:
             x, fx , y = data['pos'].cuda(), data['fx'].cuda() , data['u'].cuda() 
+
             x = x.unsqueeze(-1)
             fx = fx.unsqueeze(-1)
             optimizer.zero_grad()
-            out = model(x , fx).squeeze()
+            out = model(x , fx)
 
             loss = myloss(out, y)
             loss.backward()
@@ -106,25 +113,25 @@ def main():
         print("The loss in epoch{}:{:.5f}".format(ep, train_mse))
         scheduler.step()
 
-    model.eval()
-    rel_err = 0
-    testloss = testLoss(size_average=False)
-    with torch.no_grad():
-        for data in test_loader:
-            x, fx , y = data['pos'].cuda(), data['fx'].cuda() , data['u'].cuda() 
-            x = x.unsqueeze(-1)
-            fx = fx.unsqueeze(-1)
-            out = model(x , fx )
+        model.eval()
+        rel_err = 0
+        testloss = TestLoss(size_average=False)
+        with torch.no_grad():
+            for data in test_loader:
+                x, fx , y = data['pos'].cuda(), data['fx'].cuda() , data['u'].cuda() 
+                x = x.unsqueeze(-1)
+                fx = fx.unsqueeze(-1)
+                out = model(x , fx )
 
-            rel_err+=testloss(out , y).item()
+                rel_err+=testloss(out , y).item()
 
 
-    rel_err = rel_err/ntest
-    t2 = default_timer()
-    print("Time :{:.1f}".format(t2-t1))
-    print("rel_err:{:.5f}".format(rel_err))
+        rel_err = rel_err/ntest
+        t2 = default_timer()
+        print("Time :{:.1f}".format(t2-t1))
+        print("rel_err:{:.5f}".format(rel_err))
        
-    torch.save(model.state_dict(), '/home/xzp/ONOtest/ONO/model/Burger424.pkl')
+
 
 if __name__ == "__main__":
     main()

@@ -12,22 +12,70 @@ train_path = './piececonst_r421_N1024_smooth1.mat'
 test_path = './piececonst_r421_N1024_smooth2.mat'
 
 
-
 batch_size = 5
 learning_rate = 0.001
-epochs = 5
+epochs = 100
 step_size = 50
 gamma = 0.5
 ntrain = 1000
-ntest = 1000
+ntest = 100
 
+
+class UnitGaussianNormalizer(object):
+    def __init__(self, x, eps=0.00001, time_last=True):
+        super(UnitGaussianNormalizer, self).__init__()
+
+        # x could be in shape of ntrain*n or ntrain*T*n or ntrain*n*T in 1D
+        # x could be in shape of ntrain*w*l or ntrain*T*w*l or ntrain*w*l*T in 2D
+        self.mean = torch.mean(x, 0)
+        self.std = torch.std(x, 0)
+        self.eps = eps
+        self.time_last = time_last # if the time dimension is the last dim
+
+
+    def encode(self, x):
+        x = (x - self.mean) / (self.std + self.eps)
+        return x
+
+    def decode(self, x, sample_idx=None):
+        # sample_idx is the spatial sampling mask
+        if sample_idx is None:
+            std = self.std + self.eps # n
+            mean = self.mean
+        else:
+            if self.mean.ndim == sample_idx.ndim or self.time_last:
+                std = self.std[sample_idx] + self.eps  # batch*n
+                mean = self.mean[sample_idx]
+            if self.mean.ndim > sample_idx.ndim and not self.time_last:
+                    std = self.std[...,sample_idx] + self.eps # T*batch*n
+                    mean = self.mean[...,sample_idx]
+        # x is in shape of batch*(spatial discretization size) or T*batch*(spatial discretization size)
+        x = (x * std) + mean
+        return x
+
+    def to(self, device):
+        if torch.is_tensor(self.mean):
+            self.mean = self.mean.to(device)
+            self.std = self.std.to(device)
+        else:
+            self.mean = torch.from_numpy(self.mean).to(device)
+            self.std = torch.from_numpy(self.std).to(device)
+        return self
+
+    def cuda(self):
+        self.mean = self.mean.cuda()
+        self.std = self.std.cuda()
+
+    def cpu(self):
+        self.mean = self.mean.cpu()
+        self.std = self.std.cpu()
 
 #sol(n,421,421) coeff(n,421,421)
 class DarcyDataset(Dataset):
     def __init__(self,
                  data_path=None,
                  n_grid = 421,
-                 data_len=1000
+                 data_len=1000,
                  ):
         self.data_path = data_path
         self.n_grid = n_grid
@@ -44,6 +92,7 @@ class DarcyDataset(Dataset):
         self.x = self.x.reshape(self.x.shape[0],-1,1)
         self.u = data['sol'][:self.data_len]
         self.u = self.u.reshape(self.u.shape[0],-1,1)
+
         del data
         gc.collect()
         
@@ -58,66 +107,103 @@ class DarcyDataset(Dataset):
     def __getitem__(self, index):
         pos = torch.from_numpy(self.pos)
         fx = torch.from_numpy(self.x[index])
-        u = torch.from_numpy(self.u[index])
+        u = torch.from_numpy(self.u[index])       
         
         return dict(pos=pos.float(),
                     fx = fx.float(),
                     u = u.float())
-        
-def main():
-    train_dataset = DarcyDataset(data_path = train_path, data_len=ntrain)
-    test_dataset = DarcyDataset(data_path = test_path, data_len = ntest)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-    print('dataloading is over')
-    model = ONO(space_dim=2, ortho=True ).cuda()
-    
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
-    myloss = torch.nn.MSELoss()
+r = 5
+h = int(((421 - 1)/r) + 1)
+s = h
+ 
+def main():
+    train_data = scio.loadmat(train_path)
+    
+    x_train = train_data['coeff'][:ntrain,::r,::r][:,:s,:s]
+    #x_train = x_train.reshape(ntrain, -1)
+    x_train = torch.from_numpy(x_train).float().cuda()
+    y_train = train_data['sol'][:ntrain,::r,::r][:,:s,:s]
+    y_train = y_train.reshape(ntrain, -1)
+    y_train = torch.from_numpy(y_train).cuda()
+    
+    test_data = scio.loadmat(test_path)
+    
+    x_test = test_data['coeff'][:ntest,::r,::r][:,:s,:s]
+    #x_test = x_test.reshape(ntest, -1)
+    x_test = torch.from_numpy(x_test).float().cuda()
+    y_test= test_data['sol'][:ntest,::r,::r][:,:s,:s]
+    y_test = y_test.reshape(ntest, -1)
+    y_test = torch.from_numpy(y_test).cuda()
+
+    x_normalizer = UnitGaussianNormalizer(x_train)
+    y_normalizer = UnitGaussianNormalizer(y_train)
+    x_normalizer.cuda()
+    y_normalizer.cuda()
+    
+    x_train = x_normalizer.encode(x_train)
+    x_test = x_normalizer.encode(x_test)
+    
+    y_train = y_normalizer.encode(y_train)
+    
+    x = np.linspace(0, 1, s)
+    y = np.linspace(0, 1, s)
+    x, y = np.meshgrid(x, y)
+    pos = np.c_[x.ravel(), y.ravel()]
+    pos = torch.tensor(pos, dtype=torch.float).cuda().unsqueeze(0)
+    pos_train = pos.repeat(ntrain,1,1)
+    pos_test = pos.repeat(ntest,1,1)
+    
+    print("Dataloading is over.")
+    
+    train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(pos_train, x_train, y_train), batch_size=batch_size, shuffle=True)
+    test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(pos_test, x_test, y_test), batch_size=batch_size, shuffle=False)
+    
+    model = ONO(space_dim=2, ortho=True, res = s).cuda()
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    myloss = TestLoss(size_average=False)
+
     
     for ep in tqdm(range(epochs)):
 
         model.train()
-        t1 = default_timer()
-        train_mse = 0
-        n = 0
-        for data in train_loader:
-            x, fx , y = data['pos'].cuda(), data['fx'].cuda() , data['u'].cuda()
+        train_loss = 0
+ 
+        for x, fx , y in train_loader:
 
             optimizer.zero_grad()
-            out = model(x , fx)
+            out = model(x , fx.unsqueeze(-1)).squeeze(-1)
+            out = y_normalizer.decode(out)
+            y = y_normalizer.decode(y)
             loss = myloss(out, y)
             loss.backward()
             
             print("loss:{}".format(loss.item()))
             optimizer.step()
-            train_mse+=loss.item()
-            n+=1
+            train_loss+=loss.item()
         
-        train_mse = train_mse/n
-        print("The loss in epoch{}:{:.5f}".format(ep, train_mse))
+        train_loss = train_loss/ntrain
+        print("The loss in epoch{}:{:.5f}".format(ep, train_loss))
         scheduler.step()
 
-    model.eval()
-    testloss = TestLoss(size_average=False)
-    rel_err = 0.0
-    with torch.no_grad():
-        for data in test_loader:
-            x, fx , y = data['pos'].cuda(), data['fx'].cuda() , data['u'].cuda()
+        model.eval()
+        testloss = TestLoss(size_average=False)
+        rel_err = 0.0
+        with torch.no_grad():
+            for x, fx, y in test_loader:
+                
+                out = model(x, fx.unsqueeze(-1)).squeeze(-1)
+                out = y_normalizer.decode(out)
 
-            out = model(x ,fx)
+                tl = testloss(out, y).item()
 
-            rel_err += testloss(out.view(batch_size,-1), y.view(batch_size,-1)).item()
+                rel_err+=tl
 
-
-    rel_err /= ntest
-    t2 = default_timer()
-    
-    print("rel_err:{}".format(rel_err))
+        rel_err /= ntest
+        print("rel_err:{}".format(rel_err))
        
-    torch.save(model.state_dict(), '/home/xzp/ONOtest/ONO/model/darcy.pkl')
 
 if __name__ == "__main__":
     main()
