@@ -4,7 +4,7 @@ import gc
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from ONOmodel import ONO
+from ONOmodelpush import ONO
 from timeit import default_timer
 from tqdm import *
 from testloss import TestLoss
@@ -12,14 +12,22 @@ train_path = './piececonst_r421_N1024_smooth1.mat'
 test_path = './piececonst_r421_N1024_smooth2.mat'
 
 
-batch_size = 5
+batch_size = 10
 learning_rate = 0.001
-epochs = 100
+epochs = 500
 step_size = 50
 gamma = 0.5
 ntrain = 1000
 ntest = 100
 
+def count_parameters(model):
+  total_params = 0
+  for name, parameter in model.named_parameters():
+      if not parameter.requires_grad: continue
+      params = parameter.numel()
+      total_params+=params
+  print(f"Total Trainable Params: {total_params}")
+  return total_params
 
 class UnitGaussianNormalizer(object):
     def __init__(self, x, eps=0.00001, time_last=True):
@@ -121,7 +129,7 @@ def main():
     train_data = scio.loadmat(train_path)
     
     x_train = train_data['coeff'][:ntrain,::r,::r][:,:s,:s]
-    #x_train = x_train.reshape(ntrain, -1)
+    x_train = x_train.reshape(ntrain, -1)
     x_train = torch.from_numpy(x_train).float().cuda()
     y_train = train_data['sol'][:ntrain,::r,::r][:,:s,:s]
     y_train = y_train.reshape(ntrain, -1)
@@ -130,7 +138,7 @@ def main():
     test_data = scio.loadmat(test_path)
     
     x_test = test_data['coeff'][:ntest,::r,::r][:,:s,:s]
-    #x_test = x_test.reshape(ntest, -1)
+    x_test = x_test.reshape(ntest, -1)
     x_test = torch.from_numpy(x_test).float().cuda()
     y_test= test_data['sol'][:ntest,::r,::r][:,:s,:s]
     y_test = y_test.reshape(ntest, -1)
@@ -159,12 +167,15 @@ def main():
     train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(pos_train, x_train, y_train), batch_size=batch_size, shuffle=True)
     test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(pos_test, x_test, y_test), batch_size=batch_size, shuffle=False)
     
-    model = ONO(space_dim=2, ortho=True, res = s).cuda()
+    model = ONO(n_hidden = 128, n_layers=5, space_dim=2, ortho=True, res = s).cuda()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    #OneCycleLR在中后段更稳定
+    #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs) 
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr = learning_rate, epochs=epochs, steps_per_epoch=len(train_loader))
     myloss = TestLoss(size_average=False)
 
+    count_parameters(model)  
     
     for ep in tqdm(range(epochs)):
 
@@ -180,13 +191,14 @@ def main():
             loss = myloss(out, y)
             loss.backward()
             
-            print("loss:{}".format(loss.item()))
+            print("loss:{}".format(loss.item()/batch_size))
             optimizer.step()
             train_loss+=loss.item()
+            scheduler.step()            
         
         train_loss = train_loss/ntrain
         print("The loss in epoch{}:{:.5f}".format(ep, train_loss))
-        scheduler.step()
+
 
         model.eval()
         testloss = TestLoss(size_average=False)

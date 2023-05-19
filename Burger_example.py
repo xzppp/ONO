@@ -4,7 +4,7 @@ import gc
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from ONOmodel import ONO
+from ONOmodelpush import ONO
 from timeit import default_timer
 from tqdm import *
 from testloss import TestLoss
@@ -12,6 +12,17 @@ from testloss import TestLoss
 data_path = './burgers_data_R10.mat'
 
 # a(2048, 8192) , u(2048, 8192)
+
+#
+def count_parameters(model):
+  total_params = 0
+  for name, parameter in model.named_parameters():
+      if not parameter.requires_grad: continue
+      params = parameter.numel()
+      total_params+=params
+  print(f"Total Trainable Params: {total_params}")
+  return total_params
+#
 
 class BurgerDataset(Dataset):
     def __init__(self,
@@ -65,11 +76,11 @@ class BurgerDataset(Dataset):
         
 batch_size = 10
 learning_rate = 0.001
-epochs = 100
+epochs = 500
 ntrain = 1000
 ntest = 100
 
-sub = 2**5 #subsampling rate
+sub = 2**0 #subsampling rate
 h = 2**13 // sub #total grid size divided by the subsampling rate
 s = h
 
@@ -83,8 +94,11 @@ def main():
     
     model = ONO(space_dim=1, ortho= True, n_hidden=128,res = s).cuda()
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    #OneCycleLR在中后段更稳定
+    #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr = learning_rate,  epochs=epochs, steps_per_epoch=len(train_loader))
     myloss = TestLoss(size_average=False)
+    
     
     print('s = {}'.format(s))
     
@@ -104,14 +118,14 @@ def main():
 
             loss = myloss(out, y)
             loss.backward()
-            print("loss:{}".format(loss.item()))
+            print("loss:{}".format(loss.item()/batch_size))
             optimizer.step()
             train_mse+=loss.item()
-            
-        
+            scheduler.step()   
+                     
         train_mse = train_mse/ntrain
         print("The loss in epoch{}:{:.5f}".format(ep, train_mse))
-        scheduler.step()
+
 
         model.eval()
         rel_err = 0
@@ -130,7 +144,8 @@ def main():
         t2 = default_timer()
         print("Time :{:.1f}".format(t2-t1))
         print("rel_err:{:.5f}".format(rel_err))
-       
+
+    count_parameters(model)          
 
 
 if __name__ == "__main__":
