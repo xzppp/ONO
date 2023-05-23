@@ -70,6 +70,120 @@ def orthogonal_tensor(X):
 
 
 
+class ONOBlock_linear_attn(nn.Module):
+    """Transformer encoder block."""
+
+    def __init__(
+            self,
+            num_heads: int,
+            hidden_dim: int,
+            # mlp_dim: int,
+            dropout: float,
+            attention_dropout: float,
+            # head_dim: int,
+            norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
+            ortho=False,
+            act='gelu'
+    ):
+        super().__init__()
+
+        self.attention_dropout = attention_dropout
+        self.ortho = ortho
+        self.n_heads = num_heads
+        # Attention block
+        self.ln_1 = norm_layer(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+
+        # MLP block
+        self.ln_2 = norm_layer(hidden_dim)
+        self.ln_f = norm_layer(hidden_dim)
+        # self.mlp1 = MLPBlock(hidden_dim, hidden_dim, dropout)
+        self.mlp1 = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim,hidden_dim)
+        )
+        # self.mlp2 = MLPBlock(hidden_dim, hidden_dim, dropout)
+        self.mlp2 = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim,hidden_dim)
+        )
+
+        self.query1 = nn.Linear(hidden_dim, hidden_dim)
+        self.key1 = nn.Linear(hidden_dim, hidden_dim)
+        self.value1= nn.Linear(hidden_dim, hidden_dim)
+
+        self.query2 = nn.Linear(hidden_dim, hidden_dim)
+        self.key2 = nn.Linear(hidden_dim, hidden_dim)
+        self.value2 = nn.Linear(hidden_dim, hidden_dim)
+
+        self.attn = LinearSelfAttention(hidden_dim, causal=False, heads=num_heads, dim_head=hidden_dim // num_heads)
+        if act == 'gelu':
+            self.act = nn.GELU()
+        else:
+            self.act = nn.Sigmoid()
+
+        self.initialize_weights()
+
+    def initialize_weights(self):
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=0.002)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, (nn.LayerNorm, nn.BatchNorm1d)):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)
+
+
+    def linear_attention(self, q, k, v, n_head=1):
+        B, T1, C = q.size()
+        _, T2, _ = k.size()
+        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
+        q = q.view(B, T1, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
+        k = k.view(B, T2, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
+        v = v.view(B, T2, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
+
+        q = q.softmax(dim=-1)
+        k = k.softmax(dim=-1)  #
+        k_cumsum = k.sum(dim=-2, keepdim=True)
+        D_inv = 1. / (q * k_cumsum).sum(dim=-1, keepdim=True)  # normalized
+
+        context = k.transpose(-2, -1) @ v
+        y = (q @ context) * D_inv
+
+        # output projection
+        y = rearrange(y, 'b h n d -> b n (h d)')
+
+        return y
+
+
+    def forward(self, input: torch.Tensor, fx):
+        # torch._assert(input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}")
+        x = self.ln_1(input)
+        q1, k1, v1 = self.query1(x), self.key1(x), self.value1(x)
+        x = self.mlp1(self.linear_attention(q1, k1, v1,self.n_heads)) + x
+
+        # x = self.dropout(x)
+
+
+        x = self.ln_2(x)
+
+        fx = self.ln_f(fx)
+        q2 = self.query2(fx)
+        x = orthogonal_qr(x) if self.ortho else x
+        k2, v2 =  self.key2(x), self.value2(x)
+
+        fx = self.mlp2(self.linear_attention(q2, k2, v2, self.n_heads)) + fx
+
+
+        return x, fx
+
+
+
 class ONOBlock(nn.Module):
     """Transformer encoder block."""
 
@@ -97,6 +211,7 @@ class ONOBlock(nn.Module):
         self.ln_2 = norm_layer(hidden_dim)
         self.mlp = MLPBlock(hidden_dim, hidden_dim, dropout)
 
+        self.mlp2 = MLPBlock(hidden_dim, hidden_dim, dropout)
         self.attn = LinearSelfAttention(hidden_dim, causal = False, heads = num_heads, dim_head = hidden_dim // num_heads)
         if act == 'gelu':
             self.act = nn.GELU()
@@ -120,7 +235,9 @@ class ONOBlock(nn.Module):
     def forward(self, input: torch.Tensor , fx):
         #torch._assert(input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}")
         x = self.ln_1(input)
+
         x = self.attn(x)
+        # x = torch.matmul(x, torch.matmul(x.transpose(-2,-1), x))
         x = self.dropout(x)
         x = x + input
 
@@ -131,6 +248,7 @@ class ONOBlock(nn.Module):
         x_ = orthogonal_qr(x)  if self.ortho else x
         #fx = fx.view(fx.shape[0],fx.shape[1],1)
         fx = torch.matmul(x_,torch.matmul(x_.transpose(-2,-1),fx))
+
         fx = self.act(fx)
     
         return x , fx
@@ -140,11 +258,13 @@ class ONOBlock(nn.Module):
 class ONO(nn.Module):
     def __init__(self,
                  space_dim=2,
-                 n_layers=12,
-                 n_hidden=256,
+                 f_dim = 1,
+                 out_dim = 1,
+                 n_layers=4,
+                 n_hidden=128,
                  ffn_dropout=0.0,
                  attn_dropout=0.0,
-                 n_head=8,
+                 n_head=1,
                  Time_Input = False,
                  ortho = False,
                  act = 'gelu',
@@ -156,11 +276,15 @@ class ONO(nn.Module):
 
         self.Time_Input = Time_Input
         self.n_hidden = n_hidden
-        
-        self.preprocess = nn.Linear(space_dim , n_hidden)
+        self.f_dim = f_dim
+        # self.preprocess = nn.Linear(space_dim , n_hidden)
+        self.preprocess = nn.Sequential(nn.Linear(space_dim + f_dim, n_hidden), nn.GELU(), nn.Linear(n_hidden,n_hidden))
 
-        self.blocks = nn.Sequential(*[ONOBlock(num_heads = n_head, hidden_dim= n_hidden, dropout= ffn_dropout, attention_dropout= attn_dropout , ortho = ortho , act = act) for _ in range(n_layers)])
-        self.blocks[-1].act=nn.Identity()
+        self.f_mlp = nn.Sequential(nn.Linear(f_dim, n_hidden), nn.GELU(), nn.Linear(n_hidden, n_hidden))
+        self.out_mlp = nn.Sequential(nn.Linear(n_hidden, n_hidden),nn.GELU(),nn.Linear(n_hidden,out_dim))
+
+        self.blocks = nn.Sequential(*[ONOBlock_linear_attn(num_heads = n_head, hidden_dim= n_hidden, dropout= ffn_dropout, attention_dropout= attn_dropout , ortho = ortho , act = act) for _ in range(n_layers)])
+        # self.blocks[-1].act=nn.Identity()
         
         # self.apply(self._init_weights)
 
@@ -169,8 +293,10 @@ class ONO(nn.Module):
     # x: B , N*N , space_dim fx: B , N*N , 1  , T : B , 1
     def forward(self, x, fx ,T = None):
 
+        x = self.preprocess(torch.cat([x, fx],dim=-1))
         x = self.preprocess(x)
-        
+        # fx = self.f_mlp(fx)
+        fx = x
         if self.Time_Input == False:
             for block in self.blocks:
                 x ,fx = block(x, fx)
@@ -179,6 +305,6 @@ class ONO(nn.Module):
             for block in self.blocks:
                 x ,fx = block(x + Time_emb, fx)
             
-
+        fx = self.out_mlp(fx)
         return fx
     
