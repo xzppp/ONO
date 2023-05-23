@@ -7,13 +7,87 @@ from torch.nn import functional as F
 from torch.nn import GELU, ReLU, Tanh, Sigmoid
 from torch.nn.utils.rnn import pad_sequence
 from sympy.matrices import Matrix, GramSchmidt
-
+from torch.autograd import Variable
 from torchvision.models.vision_transformer import MLPBlock
 from functools import partial
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 from linear_attention_transformer.linear_attention_transformer import SelfAttention as LinearSelfAttention
 from timm.models.layers import trunc_normal_
+
+#n_hidden:128 burger: 0.00976(x as query) 0.00932(fx as query)
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim, out_dim, dropout = 0.):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, out_dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+class PositionalEncoding(nn.Module):
+    "Implement the PE function."
+
+    def __init__(self, d_model, dropout, max_len=421*421):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        # Compute the positional encodings once in log space.
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x):
+        x = x + self.pe[:, : x.size(1)].requires_grad_(False)
+        return self.dropout(x)
+
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim, min_freq=1/2, scale=1.):
+        super().__init__()
+        inv_freq = 1. / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        self.min_freq = min_freq
+        self.scale = scale
+        self.register_buffer('inv_freq', inv_freq)
+
+    def forward(self, coordinates, device):
+        # coordinates [b, n]
+        t = coordinates.to(device).type_as(self.inv_freq)
+        t = t * (self.scale / self.min_freq)
+        freqs = torch.einsum('... i , j -> ... i j', t, self.inv_freq)  # [b, n, d//2]
+        return torch.cat((freqs, freqs), dim=-1)  # [b, n, d]
+
+
+def rotate_half(x):
+    x = rearrange(x, '... (j d) -> ... j d', j = 2)
+    x1, x2 = x.unbind(dim = -2)
+    return torch.cat((-x2, x1), dim = -1)
+
+
+def apply_rotary_pos_emb(t, freqs):
+    return (t * freqs.cos()) + (rotate_half(t) * freqs.sin())
+
+
+def apply_2d_rotary_pos_emb(t, freqs_x, freqs_y):
+    # split t into first half and second half
+    # t: [b, h, n, d]
+    # freq_x/y: [b, n, d]
+    d = t.shape[-1]
+    t_x, t_y = t[..., :d//2], t[..., d//2:]
+
+    return torch.cat((apply_rotary_pos_emb(t_x, freqs_x),
+                      apply_rotary_pos_emb(t_y, freqs_y)), dim=-1)
 
 
 def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
@@ -36,7 +110,6 @@ def timestep_embedding(timesteps, dim, max_period=10000, repeat_only=False):
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
 
     return embedding
-
 
 def orthogonal_qr(x):
     # shape = x.shape
@@ -67,125 +140,9 @@ def orthogonal_tensor(X):
     if transposed:
         Q = Q.mT
     return Q
-
-
-
-class ONOBlock_linear_attn(nn.Module):
-    """Transformer encoder block."""
-
-    def __init__(
-            self,
-            num_heads: int,
-            hidden_dim: int,
-            # mlp_dim: int,
-            dropout: float,
-            attention_dropout: float,
-            # head_dim: int,
-            norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
-            ortho=False,
-            act='gelu'
-    ):
-        super().__init__()
-
-        self.attention_dropout = attention_dropout
-        self.ortho = ortho
-        self.n_heads = num_heads
-        # Attention block
-        self.ln_1 = norm_layer(hidden_dim)
-        self.dropout = nn.Dropout(dropout)
-
-        # MLP block
-        self.ln_2 = norm_layer(hidden_dim)
-        self.ln_f = norm_layer(hidden_dim)
-        # self.mlp1 = MLPBlock(hidden_dim, hidden_dim, dropout)
-        self.mlp1 = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim,hidden_dim)
-        )
-        # self.mlp2 = MLPBlock(hidden_dim, hidden_dim, dropout)
-        self.mlp2 = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Linear(hidden_dim,hidden_dim)
-        )
-
-        self.query1 = nn.Linear(hidden_dim, hidden_dim)
-        self.key1 = nn.Linear(hidden_dim, hidden_dim)
-        self.value1= nn.Linear(hidden_dim, hidden_dim)
-
-        self.query2 = nn.Linear(hidden_dim, hidden_dim)
-        self.key2 = nn.Linear(hidden_dim, hidden_dim)
-        self.value2 = nn.Linear(hidden_dim, hidden_dim)
-
-        self.attn = LinearSelfAttention(hidden_dim, causal=False, heads=num_heads, dim_head=hidden_dim // num_heads)
-        if act == 'gelu':
-            self.act = nn.GELU()
-        else:
-            self.act = nn.Sigmoid()
-
-        self.initialize_weights()
-
-    def initialize_weights(self):
-        self.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=0.002)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, (nn.LayerNorm, nn.BatchNorm1d)):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-
-
-    def linear_attention(self, q, k, v, n_head=1):
-        B, T1, C = q.size()
-        _, T2, _ = k.size()
-        # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q = q.view(B, T1, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
-        k = k.view(B, T2, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
-        v = v.view(B, T2, n_head, C // n_head).transpose(1, 2)  # (B, nh, T, hs)
-
-        q = q.softmax(dim=-1)
-        k = k.softmax(dim=-1)  #
-        k_cumsum = k.sum(dim=-2, keepdim=True)
-        D_inv = 1. / (q * k_cumsum).sum(dim=-1, keepdim=True)  # normalized
-
-        context = k.transpose(-2, -1) @ v
-        y = (q @ context) * D_inv
-
-        # output projection
-        y = rearrange(y, 'b h n d -> b n (h d)')
-
-        return y
-
-
-    def forward(self, input: torch.Tensor, fx):
-        # torch._assert(input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}")
-        x = self.ln_1(input)
-        q1, k1, v1 = self.query1(x), self.key1(x), self.value1(x)
-        x = self.mlp1(self.linear_attention(q1, k1, v1,self.n_heads)) + x
-
-        # x = self.dropout(x)
-
-
-        x = self.ln_2(x)
-
-        fx = self.ln_f(fx)
-        q2 = self.query2(fx)
-        x = orthogonal_qr(x) if self.ortho else x
-        k2, v2 =  self.key2(x), self.value2(x)
-
-        fx = self.mlp2(self.linear_attention(q2, k2, v2, self.n_heads)) + fx
-
-
-        return x, fx
-
-
-
-class ONOBlock(nn.Module):
-    """Transformer encoder block."""
+        
+                     
+class Attn(nn.Module):
 
     def __init__(
         self,
@@ -196,30 +153,31 @@ class ONOBlock(nn.Module):
         attention_dropout: float,
         #head_dim: int,
         norm_layer: Callable[..., torch.nn.Module] = partial(nn.LayerNorm, eps=1e-6),
-        ortho = False,
-        act = 'gelu'
+        space_dim = 1
     ):
         super().__init__()
-
         self.attention_dropout = attention_dropout
-        self.ortho = ortho
+        
         # Attention block
         self.ln_1 = norm_layer(hidden_dim)
         self.dropout = nn.Dropout(dropout)
 
         # MLP block
         self.ln_2 = norm_layer(hidden_dim)
-        self.mlp = MLPBlock(hidden_dim, hidden_dim, dropout)
-
-        self.mlp2 = MLPBlock(hidden_dim, hidden_dim, dropout)
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_dim, 2*hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(2*hidden_dim, 2*hidden_dim),
+            nn.Dropout(dropout),
+            nn.GELU(),
+            nn.Linear(2*hidden_dim, hidden_dim)
+        )
+        self.PE = PositionalEncoding(d_model=hidden_dim, dropout=0.0)
         self.attn = LinearSelfAttention(hidden_dim, causal = False, heads = num_heads, dim_head = hidden_dim // num_heads)
-        if act == 'gelu':
-            self.act = nn.GELU()
-        else:
-            self.act = nn.Sigmoid()
-
+        self.space_dim = space_dim
         self.initialize_weights()
-    
+
     def initialize_weights(self):
         self.apply(self._init_weights)
     
@@ -232,79 +190,138 @@ class ONOBlock(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)  
 
-    def forward(self, input: torch.Tensor , fx):
-        #torch._assert(input.dim() == 3, f"Expected (batch_size, seq_length, hidden_dim) got {input.shape}")
+    def forward(self, input, freq_x = None, freq_y = None):
+
         x = self.ln_1(input)
+        if self.space_dim == 1:  
+            x = self.PE(x)
+
+        elif self.space_dim == 2:
+            x = apply_2d_rotary_pos_emb(x, freq_x, freq_y)
 
         x = self.attn(x)
-        # x = torch.matmul(x, torch.matmul(x.transpose(-2,-1), x))
         x = self.dropout(x)
         x = x + input
 
         y = self.ln_2(x)
         y = self.mlp(y)
         x = x + y
+
+        return x             
+
+
+class ONOBlock(nn.Module):
+    """Transformer encoder block."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        hidden_dim: int,
+        dropout: float,
+        attention_dropout: float,
+        ortho = False,
+        act = 'gelu',
+        space_dim = 1,
+    ):
+        super().__init__()
+
+        self.attention_dropout = attention_dropout
+        self.ortho = ortho
+        self.nums_block = space_dim
+        self.space_dim = space_dim
+
+        self.Attn = Attn(num_heads = num_heads, hidden_dim=hidden_dim, dropout= dropout, attention_dropout= attention_dropout, space_dim=space_dim)
+        
+        self.act = nn.GELU()
+        self.register_parameter("mu", nn.Parameter(torch.zeros(hidden_dim)))
+
+    def forward(self, x, fx, freq_x = None, freq_y = None):
+
+        x = self.Attn(x, freq_x = freq_x, freq_y = freq_y)
         
         x_ = orthogonal_qr(x)  if self.ortho else x
-        #fx = fx.view(fx.shape[0],fx.shape[1],1)
-        fx = torch.matmul(x_,torch.matmul(x_.transpose(-2,-1),fx))
+        
+        fx = (x_*torch.nn.functional.softplus(self.mu))@(x_.transpose(-2,-1)@fx)
 
         fx = self.act(fx)
-    
+
         return x , fx
 
 
 
 class ONO(nn.Module):
     def __init__(self,
-                 space_dim=2,
-                 f_dim = 1,
-                 out_dim = 1,
-                 n_layers=4,
-                 n_hidden=128,
+                 space_dim=1,
+                 n_layers=5,
+                 n_hidden=256,
                  ffn_dropout=0.0,
                  attn_dropout=0.0,
-                 n_head=1,
+                 n_head=8,
                  Time_Input = False,
                  ortho = False,
                  act = 'gelu',
-                 #n_experts = 2,
-                 #n_inner = 4,
-                 #attn_type='linear',
+                 res = 256,
                  ):
         super(ONO, self).__init__()
 
+        self.space_dim = space_dim
         self.Time_Input = Time_Input
         self.n_hidden = n_hidden
-        self.f_dim = f_dim
-        # self.preprocess = nn.Linear(space_dim , n_hidden)
-        self.preprocess = nn.Sequential(nn.Linear(space_dim + f_dim, n_hidden), nn.GELU(), nn.Linear(n_hidden,n_hidden))
-
-        self.f_mlp = nn.Sequential(nn.Linear(f_dim, n_hidden), nn.GELU(), nn.Linear(n_hidden, n_hidden))
-        self.out_mlp = nn.Sequential(nn.Linear(n_hidden, n_hidden),nn.GELU(),nn.Linear(n_hidden,out_dim))
-
-        self.blocks = nn.Sequential(*[ONOBlock_linear_attn(num_heads = n_head, hidden_dim= n_hidden, dropout= ffn_dropout, attention_dropout= attn_dropout , ortho = ortho , act = act) for _ in range(n_layers)])
-        # self.blocks[-1].act=nn.Identity()
         
-        # self.apply(self._init_weights)
+        self.preprocess_x = FeedForward(dim = space_dim, hidden_dim= n_hidden, out_dim = n_hidden//2)
+        self.preprocess_f = FeedForward(dim = 1, hidden_dim= n_hidden, out_dim = n_hidden//2)
+
+        self.blocks = nn.Sequential(*[ONOBlock(num_heads = n_head, hidden_dim=n_hidden, dropout= ffn_dropout, attention_dropout= attn_dropout , ortho = ortho , act = act, space_dim=space_dim) for _ in range(n_layers)])
+        self.blocks[-1].act=nn.Identity()
+
+        self.emb_module_f = RotaryEmbedding(n_hidden // space_dim, min_freq=1.0/res)
 
         self.__name__ = 'ONO'
+        
+        self.initialize_weights()
+    
+    def initialize_weights(self):
+        self.apply(self._init_weights)
+    
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            trunc_normal_(m.weight, std=0.1)
+            if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, (nn.LayerNorm, nn.BatchNorm1d)):
+            nn.init.constant_(m.bias, 0)
+            nn.init.constant_(m.weight, 1.0)  
 
     # x: B , N*N , space_dim fx: B , N*N , 1  , T : B , 1
     def forward(self, x, fx ,T = None):
 
-        x = self.preprocess(torch.cat([x, fx],dim=-1))
-        x = self.preprocess(x)
-        # fx = self.f_mlp(fx)
-        fx = x
+        # 1d情况下分开升维再concate比concate后升维效果更好,1d情况升维不需要mlp只需要单层linear便可达到需要的效果
+        if self.space_dim == 1:
+            x = self.preprocess_x(x)
+            Input_f = self.preprocess_f(fx)
+            x = torch.cat((x, Input_f),-1)
+
+        elif self.space_dim == 2 :
+            freq_x = self.emb_module_f.forward(x[..., 0], x.device)
+            freq_y = self.emb_module_f.forward(x[..., 1], x.device)
+            
+            x = self.preprocess_x(x)
+            Input_f = self.preprocess_f(fx)
+            x = torch.cat((x, Input_f),-1)   
+            
+        
         if self.Time_Input == False:
             for block in self.blocks:
-                x ,fx = block(x, fx)
+                if self.space_dim == 2:
+                    x ,fx = block(x, fx, freq_x = freq_x, freq_y = freq_y)
+                elif self.space_dim == 1:
+                    x ,fx = block(x, fx)
+
         else :
             Time_emb = timestep_embedding(T , self.n_hidden).repeat(1,x.shape[1],1)
+            Time_emb = self.tim_fc(Time_emb)
             for block in self.blocks:
-                x ,fx = block(x + Time_emb, fx)
-            
-        fx = self.out_mlp(fx)
+                x ,fx = block(x, fx)   
+                    
         return fx
     
