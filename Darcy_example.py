@@ -1,15 +1,17 @@
+import os
+
 import numpy as np
 import scipy.io as scio
 import gc
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from ONOmodelpush import ONO
+from ONOmodel import ONO
 from timeit import default_timer
 from tqdm import *
 from testloss import TestLoss
-train_path = './piececonst_r421_N1024_smooth1.mat'
-test_path = './piececonst_r421_N1024_smooth2.mat'
+train_path = './../data/piececonst_r421_N1024_smooth1.mat'
+test_path = './../data/piececonst_r421_N1024_smooth2.mat'
 
 
 batch_size = 10
@@ -191,7 +193,7 @@ def main():
             loss = myloss(out, y)
             loss.backward()
             
-            print("loss:{}".format(loss.item()/batch_size))
+            # print("loss:{}".format(loss.item()/batch_size))
             optimizer.step()
             train_loss+=loss.item()
             scheduler.step()            
