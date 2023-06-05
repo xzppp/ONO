@@ -1,10 +1,12 @@
+'''
+ python darcy_hzk.py --gpu 4 --model ONO2  --n-hidden 128 --n-heads 2 --n-layers 8 --lr 0.001 --use_tb 1 --attn_type nystrom --max_grad_norm 0.1 --orth 1 --psi_dim 64
+    Epoch 499 Train loss : 0.01170
+    rel_err:0.010719405152161838
+'''
 import os
-import sys
 import time
 import argparse
-sys.path.append('../..')
 parser = argparse.ArgumentParser('Training Transformer')
-
 
 parser.add_argument('--lr',type=float, default=1e-3)
 parser.add_argument('--epochs',type=int, default=500)
@@ -15,12 +17,13 @@ parser.add_argument("--width", type=int, default=32, help="Width")
 parser.add_argument('--n-hidden',type=int, default=64, help='hidden dim of ONO')
 parser.add_argument('--n-layers',type=int, default=3, help='layers of ONO')
 parser.add_argument('--n-heads',type=int, default=4)
-parser.add_argument('--ortho',type=int, default=0, help='orthogonal')
-parser.add_argument("--s1", type=int, default=40, help="s1 value")
-parser.add_argument("--s2", type=int, default=40, help="s2 value")
 parser.add_argument('--batch-size',type=int, default=8)
 parser.add_argument("--use_tb", type=int, default=0, help="Use TensorBoard: 1 for True, 0 for False")
 parser.add_argument("--gpu", type=str, default='1', help="GPU index to use")
+parser.add_argument("--orth", type=int, default=0)
+parser.add_argument("--psi_dim", type=int, default=64)
+parser.add_argument('--attn_type',type=str, default=None)
+parser.add_argument('--max_grad_norm',type=float, default=None)
 args = parser.parse_args()
 
 os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
@@ -36,24 +39,16 @@ from tqdm import *
 from testloss import TestLoss
 
 from ONOmodel import ONO
-from fourier_neural_operator.ONO.fno_hzk import FNO2d
-from fourier_neural_operator.ONO.ONOmodel2 import ONO2
-from fourier_neural_operator.ONO.cgpt import CGPTNO
-from fourier_neural_operator.Adam import Adam
+from ONOmodel2 import ONO2
+from cgpt import CGPTNO
+
 from torch.utils.tensorboard import SummaryWriter
 
-
-
-train_path = './../data/piececonst_r421_N1024_smooth1.mat'
-test_path = './../data/piececonst_r421_N1024_smooth2.mat'
-
-batch_size = 10
-learning_rate = 0.001
-epochs = 500
-step_size = 50
-gamma = 0.5
+train_path = './data/piececonst_r421_N1024_smooth1.mat'
+test_path = './data/piececonst_r421_N1024_smooth2.mat'
 ntrain = 1000
 ntest = 100
+epochs = 500
 
 
 def count_parameters(model):
@@ -64,8 +59,6 @@ def count_parameters(model):
         total_params += params
     print(f"Total Trainable Params: {total_params}")
     return total_params
-
-
 
 class IdentityTransformer():
     def __init__(self, X):
@@ -232,7 +225,6 @@ r = 5
 h = int(((421 - 1) / r) + 1)
 s = h
 
-
 def main():
     train_data = scio.loadmat(train_path)
 
@@ -282,23 +274,23 @@ def main():
                                               batch_size=args.batch_size, shuffle=False)
 
     if args.model == 'FNO':
+        from fno_hzk import FNO2d
+        from fourier_neural_operator.Adam import Adam
         model = FNO2d(modes1=args.modes, modes2=args.modes, width=args.width, res=s).cuda()
-        optimizer = Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
+        optimizer = Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     elif args.model in ['ONO', 'ONO2','CGPT']:
         if args.model == 'ONO2':
-            model = ONO2(n_hidden=args.n_hidden, n_layers=args.n_layers, space_dim=2, ortho=args.ortho, n_head = args.n_heads,res=s).cuda()
-        elif args.model == 'ONO':
-            model = ONO(n_hidden=args.n_hidden, n_layers=args.n_layers, space_dim=2, ortho=args.ortho, res=s).cuda()
+            model = ONO2(n_hidden=args.n_hidden, n_layers=args.n_layers, space_dim=2, n_head = args.n_heads, attn_type=args.attn_type, orth=args.orth, psi_dim=args.psi_dim).cuda()
         elif args.model == 'CGPT':
             model = CGPTNO(trunk_size=3, branch_sizes=None, output_size=1, n_layers=args.n_layers, n_hidden=args.n_hidden, n_inner=4, mlp_layers=2).cuda()
         else:
             raise NotImplementedError
-        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     use_writer = args.use_tb
     if use_writer:
-        writer = SummaryWriter(log_dir='./../data/logs/' + args.model + time.strftime('_%m%d_%H_%M_%S'))
+        writer = SummaryWriter(log_dir='./logs/' + args.model + time.strftime('_%m%d_%H_%M_%S'))
     else:
         writer = None
     print(model)
@@ -327,6 +319,8 @@ def main():
             loss.backward()
 
             # print("loss:{}".format(loss.item()/batch_size))
+            if args.max_grad_norm is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             optimizer.step()
             train_loss += loss.item()
             scheduler.step()
