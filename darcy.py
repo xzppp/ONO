@@ -1,5 +1,5 @@
 '''
- python darcy_hzk.py --gpu 4 --model ONO2  --n-hidden 128 --n-heads 2 --n-layers 8 --lr 0.001 --use_tb 1 --attn_type nystrom --max_grad_norm 0.1 --orth 1 --psi_dim 64
+ python darcy.py --gpu 4 --model ONO2  --n-hidden 128 --n-heads 2 --n-layers 8 --lr 0.001 --use_tb 1 --attn_type nystrom --max_grad_norm 0.1 --orth 1 --psi_dim 64
     Epoch 499 Train loss : 0.01170
     rel_err:0.010719405152161838
 '''

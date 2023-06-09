@@ -116,7 +116,7 @@ class ONOBlock(nn.Module):
         self.ln_2 = nn.LayerNorm(hidden_dim)
         self.mlp = MLP(hidden_dim, hidden_dim * mlp_ratio, hidden_dim, n_layers=0, res=False, act=act)
 
-        self.proj = MLP(hidden_dim, hidden_dim, psi_dim, n_layers=0, res=False, act=act) if orth else nn.Identity()
+        self.proj = MLP(hidden_dim, hidden_dim, psi_dim, n_layers=0, res=False, act=act)# if orth else nn.Identity()
         self.register_parameter("mu", nn.Parameter(torch.zeros(psi_dim)))
         self.ln_3 = nn.LayerNorm(hidden_dim)
         self.mlp2 = nn.Linear(hidden_dim, 1) if last_layer else MLP(hidden_dim, hidden_dim * mlp_ratio, hidden_dim, n_layers=0, res=False, act=act)

@@ -1,3 +1,8 @@
+'''
+python burger_xzp.py --gpu 5 --model ONO2  --n-hidden 128 --n-heads 2 --n-layers 8 --lr 0.001 --use_tb 1 --attn_type nystrom --max_grad_norm 0.1 --orth 1 --psi_dim 32 --batch-size 16
+Time :7.2
+rel_err:0.01092
+'''
 import argparse
 
 parser = argparse.ArgumentParser(description="Demo of argparse for integer variables")
@@ -163,12 +168,12 @@ def main():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm) 
             optimizer.step()
             train_mse+=loss.item()
+            scheduler.step()
 
             #if ii % args.epochs == (args.epochs-1):
                 #print("loss:{} ori loss {}".format(loss.item(), ori_loss.item()))
 
         train_mse = train_mse/ntrain
-        scheduler.step()
         model.eval()
         rel_err = 0
         testloss = testLoss(size_average=False)
@@ -187,7 +192,7 @@ def main():
                 # rel_err+=testloss(out , y).item()
                 rel_err += testloss(out, y).item()
             rel_err = rel_err / ntest
-            print("The loss in epoch {}: {:.5f} test rel err {}".format(ep, train_mse, rel_err))
+            print("The loss in epoch {}: {:.5f} test rel err {} lr {}".format(ep, train_mse, rel_err, optimizer.param_groups[0]['lr']))
 
 
     t2 = default_timer()
