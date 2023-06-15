@@ -29,6 +29,35 @@ ACTIVATION = {'gelu':nn.GELU,'tanh':nn.Tanh,'sigmoid':nn.Sigmoid,'relu':nn.ReLU,
 '''
     A simple MLP class, includes at least 2 layers and n hidden layers
 '''
+
+def orthogonal_qr(x):
+    # shape = x.shape
+    # reshaped_x = x.reshape(-1, shape[-2], shape[-1])
+    Q, _ = torch.linalg.qr(x,mode='reduced')  # 使用 PyTorch 的 QR 分解函数
+    return Q
+
+class PositionalEncoding(nn.Module):
+    "Implement the PE function."
+
+    def __init__(self, d_model, dropout, max_len=421*421):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        # Compute the positional encodings once in log space.
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer("pe", pe)
+
+    def forward(self, x):
+        x = x + self.pe[:, : x.size(1)].requires_grad_(False)
+        return self.dropout(x)
+
 class MLP(nn.Module):
     def __init__(self, n_input, n_hidden, n_output, n_layers=1, act='gelu', res=True):
         super(MLP, self).__init__()
@@ -94,13 +123,14 @@ class ONOBlock(nn.Module):
             last_layer=False,
             momentum=0.9,
             psi_dim=64,
+            ort_type = 'chol',
     ):
         super().__init__()
         self.orth = orth
         self.momentum = momentum
         if self.orth:
             self.register_buffer("feature_cov", None)
-
+        self.ort_type = ort_type
         self.ln_1 = nn.LayerNorm(hidden_dim)
         if attn_type == 'performer':
             self.Attn = PerformerSelfAttention(hidden_dim, causal = False, heads = num_heads, dropout=dropout, no_projection=True) # this is not preformer now
@@ -113,19 +143,24 @@ class ONOBlock(nn.Module):
         else:
             self.Attn = LinearSelfAttention(hidden_dim, causal = False, heads = num_heads, dropout=dropout, attn_dropout=attention_dropout)
 
+        #self.PE = PositionalEncoding(hidden_dim, 0.0)
         self.ln_2 = nn.LayerNorm(hidden_dim)
         self.mlp = MLP(hidden_dim, hidden_dim * mlp_ratio, hidden_dim, n_layers=0, res=False, act=act)
-
-        self.proj = MLP(hidden_dim, hidden_dim, psi_dim, n_layers=0, res=False, act=act)# if orth else nn.Identity()
+        #self.ln_4 = nn.LayerNorm(psi_dim)
+        #self.proj = MLP(hidden_dim, hidden_dim, psi_dim, n_layers=0, res=False, act=act)# if orth else nn.Identity()
+        self.proj = nn.Linear(hidden_dim, psi_dim)
         self.register_parameter("mu", nn.Parameter(torch.zeros(psi_dim)))
         self.ln_3 = nn.LayerNorm(hidden_dim)
-        self.mlp2 = nn.Linear(hidden_dim, 1) if last_layer else MLP(hidden_dim, hidden_dim * mlp_ratio, hidden_dim, n_layers=0, res=False, act=act)
+        self.mlp2 = nn.Linear(hidden_dim, 1) if last_layer else MLP(hidden_dim, hidden_dim , hidden_dim, n_layers=0, res=False, act=act)
 
     def forward(self, x, fx):
+        #x = self.PE(x)
         x = self.Attn(self.ln_1(x)) + x
         x = self.mlp(self.ln_2(x)) + x
 
         x_ = self.proj(x)
+        #x_ = self.ln_4(x_)
+        
         if self.orth:
             if self.training:
                 batch_cov = torch.einsum("blc, bld->cd", x_, x_) / x_.shape[0] / x_.shape[1]
@@ -139,9 +174,9 @@ class ONOBlock(nn.Module):
             L = psd_safe_cholesky(batch_cov)
             L_inv_T = L.inverse().transpose(-2, -1)
             x_ = x_ @ L_inv_T
-
+                
         fx = (x_ * torch.nn.functional.softplus(self.mu)) @ (x_.transpose(-2, -1) @ fx) # + fx
-        fx = self.mlp2(self.ln_3(fx)) # + fx
+        fx = self.mlp2(self.ln_3(fx))  #+ fx
         return x, fx
 
 class ONO2(nn.Module):
@@ -155,9 +190,11 @@ class ONO2(nn.Module):
                  Time_Input=False,
                  act='gelu',
                  attn_type=None,
-                 mlp_ratio=4,
+                 mlp_ratio=1,
                  orth=False,
-                 psi_dim=64
+                 psi_dim=64,
+                 ort_type = 'chol',
+                 momentum = 0.9,
         ):
         super(ONO2, self).__init__()
         self.__name__ = 'ONO'
@@ -165,12 +202,13 @@ class ONO2(nn.Module):
         self.Time_Input = Time_Input
         self.n_hidden = n_hidden
 
-        self.preprocess = MLP(1 + space_dim, n_hidden * mlp_ratio, n_hidden * 2, n_layers=0, act=act)
+        #self.preprocess = MLP(1 + space_dim, n_hidden * mlp_ratio, n_hidden * 2, n_layers=0, act=act)
+        self.preprocess = nn.Linear(1+space_dim, n_hidden*2)
         self.blocks = nn.ModuleList([ONOBlock(num_heads=n_head, hidden_dim=n_hidden, 
                                               dropout=dropout, attention_dropout=attn_dropout,
                                               act=act, attn_type=attn_type, 
-                                              mlp_ratio=mlp_ratio, orth=orth,
-                                              psi_dim=psi_dim,
+                                              mlp_ratio=mlp_ratio, orth=orth, momentum = momentum,
+                                              psi_dim=psi_dim, ort_type = ort_type,
                                               last_layer = (_ == n_layers - 1))
                                         for _ in range(n_layers)])
         self.initialize_weights()

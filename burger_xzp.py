@@ -26,6 +26,7 @@ parser.add_argument("--orth", type=int, default=0)
 parser.add_argument("--psi_dim", type=int, default=64)
 parser.add_argument('--attn_type',type=str, default=None)
 parser.add_argument('--max_grad_norm',type=float, default=None)
+parser.add_argument('--momentum',type=float, default=0.9)
 args = parser.parse_args()
 
 import os
@@ -46,6 +47,14 @@ from tqdm import *
 from data_utils import LossFunc as testLoss, UnitGaussianNormalizer, GaussianNormalizer, IdentityNormalizer, count_params
 from torch.utils.tensorboard import SummaryWriter
 
+def count_parameters(model):
+  total_params = 0
+  for name, parameter in model.named_parameters():
+      if not parameter.requires_grad: continue
+      params = parameter.numel()
+      total_params+=params
+  print(f"Total Trainable Params: {total_params}")
+  return total_params
 
 # data_path = './burgers_data_R10.mat'
 data_path = './data/burgers_data_R10.mat'
@@ -117,7 +126,7 @@ def main():
     print('dataloading is over')
     
     if args.model == 'ONO2':
-        model = ONO2(n_hidden=args.n_hidden, n_layers=args.n_layers, space_dim=1, n_head = args.n_heads, attn_type=args.attn_type, orth=args.orth, psi_dim=args.psi_dim).cuda()
+        model = ONO2(n_hidden=args.n_hidden, n_layers=args.n_layers, space_dim=1, n_head = args.n_heads, momentum=args.momentum, orth=args.orth, psi_dim=args.psi_dim).cuda()
     else:
         raise NotImplementedError
         
@@ -131,7 +140,7 @@ def main():
     else:
         writer = None
     print(model)
-
+    count_parameters(model)
     # OneCycleLR在中后段更稳定
     # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=args.lr, epochs=args.epochs,
@@ -160,7 +169,7 @@ def main():
             out = model(x , fx).squeeze()
             # out = model(fx).squeeze()
 
-            #ori_pred,  ori_target = normalizer.decode(out), normalizer.decode(y)
+            #ori_pred,  ori_target = normalizer.decode(out), normalizer.decode(y)          
             loss = myloss(out, y)
             #ori_loss = myloss(ori_pred, ori_target)
             loss.backward()
