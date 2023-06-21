@@ -23,7 +23,7 @@ rel_err:0.01255
 
 `python -u Burger_example.py --gpu 0 --model ONO2  --n-hidden 128 --n-heads 8 --n-layers 5 --lr 0.001 --use_tb 1 --attn_type nystrom --max_grad_norm 0.1 --orth 1 --psi_dim 16 --downsample 2 --batch-size 8`
 
-rel_err:
+rel_err:0.01084
 
 `python -u Burger_example.py --gpu 3 --model ONO2  --n-hidden 128 --n-heads 8 --n-layers 5 --lr 0.001 --use_tb 1 --attn_type nystrom --max_grad_norm 0.1 --orth 1 --psi_dim 16 --downsample 1 --batch-size 8`
 
