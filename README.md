@@ -53,6 +53,6 @@ rel_err:0.009043
 
 s=141:
 
-'python Darcy_example.py --gpu 4 --model ONO2  --n-hidden 128 --n-heads 8 --n-layers 8 --lr 0.001 --use_tb 1 --attn_type nystrom --max_grad_norm 0.1 --orth 1 --psi_dim 16 --downsample 3 --batch-size 2 --momentum 0.9'
+`python Darcy_example.py --gpu 4 --model ONO2  --n-hidden 128 --n-heads 8 --n-layers 8 --lr 0.001 --use_tb 1 --attn_type nystrom --max_grad_norm 0.1 --orth 1 --psi_dim 16 --downsample 3 --batch-size 2 --momentum 0.9`
 
 rel_err:0.007080
