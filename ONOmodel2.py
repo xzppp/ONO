@@ -139,14 +139,14 @@ class ONOBlock(nn.Module):
 
         self.ln_2 = nn.LayerNorm(hidden_dim)
         self.mlp = MLP(hidden_dim, hidden_dim * mlp_ratio, hidden_dim, n_layers=0, res=False, act=act)
-
+        #self.time_fc = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.SiLU(),nn.Linear(hidden_dim, hidden_dim))
         self.proj = nn.Linear(hidden_dim, psi_dim)
         #self.proj = MLP(hidden_dim, hidden_dim * mlp_ratio, psi_dim, n_layers=0, res=False, act=act)
         self.register_parameter("mu", nn.Parameter(torch.zeros(psi_dim)))
         self.ln_3 = nn.LayerNorm(hidden_dim)
-        self.mlp2 = nn.Linear(hidden_dim,1) if last_layer else MLP(hidden_dim, hidden_dim * mlp_ratio, hidden_dim, n_layers=0, res=False, act=act)
+        self.mlp2 = nn.Linear(hidden_dim, 1) if last_layer else MLP(hidden_dim, hidden_dim * mlp_ratio, hidden_dim, n_layers=0, res=False, act=act)
 
-    def forward(self, x, fx):
+    def forward(self, x, fx , T = None):
 
         x = self.Attn(self.ln_1(x)) + x
         x = self.mlp(self.ln_2(x)) + x
@@ -167,7 +167,7 @@ class ONOBlock(nn.Module):
             L_inv_T = L.inverse().transpose(-2, -1)
             x_ = x_ @ L_inv_T
                 
-        fx = (x_ * torch.nn.functional.softplus(self.mu)) @ (x_.transpose(-2, -1) @ fx)  #+ fx
+        fx = (x_ * torch.nn.functional.softplus(self.mu)) @ (x_.transpose(-2, -1) @ fx)  + fx
         fx = self.mlp2(self.ln_3(fx))  #+ fx
         
         return x, fx
@@ -193,7 +193,8 @@ class ONO2(nn.Module):
 
         self.Time_Input = Time_Input
         self.n_hidden = n_hidden
-
+        if Time_Input:
+            self.time_fc = nn.Sequential(nn.Linear(n_hidden, n_hidden), nn.SiLU(),nn.Linear(n_hidden, n_hidden))
         #self.preprocess = MLP(1 + space_dim, n_hidden * mlp_ratio, n_hidden * 2, n_layers=0, act=act)
         self.preprocess = nn.Linear(1+space_dim, n_hidden*2)
         self.blocks = nn.ModuleList([ONOBlock(num_heads=n_head, hidden_dim=n_hidden, 
@@ -218,16 +219,20 @@ class ONO2(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def forward(self, x, fx, T=None):
+
         x = torch.cat((x, fx), -1)
+        #Time_emb = timestep_embedding(T, 2*self.n_hidden).repeat(1, x.shape[1], 1)
         x, fx = self.preprocess(x).chunk(2, dim=-1)
         if self.Time_Input == False:
             for i, block  in enumerate(self.blocks):
                 x, fx = block(x, fx)
         else:
             Time_emb = timestep_embedding(T, self.n_hidden).repeat(1, x.shape[1], 1)
-            Time_emb = self.tim_fc(Time_emb)
+            #Time_emb = self.time_fc(Time_emb)
+            fx = fx + Time_emb
             for block in self.blocks:
-                x, fx = block(x, fx)
+                x, fx = block(x , fx)
+                
         return fx
 
 

@@ -235,19 +235,19 @@ def main():
 
     x_train = train_data['coeff'][:ntrain, ::r, ::r][:, :s, :s]
     x_train = x_train.reshape(ntrain, -1)
-    x_train = torch.from_numpy(x_train).float().cuda()
+    x_train = torch.from_numpy(x_train).float()
     y_train = train_data['sol'][:ntrain, ::r, ::r][:, :s, :s]
     y_train = y_train.reshape(ntrain, -1)
-    y_train = torch.from_numpy(y_train).cuda()
+    y_train = torch.from_numpy(y_train)
 
     test_data = scio.loadmat(test_path)
 
     x_test = test_data['coeff'][:ntest, ::r, ::r][:, :s, :s]
     x_test = x_test.reshape(ntest, -1)
-    x_test = torch.from_numpy(x_test).float().cuda()
+    x_test = torch.from_numpy(x_test).float()
     y_test = test_data['sol'][:ntest, ::r, ::r][:, :s, :s]
     y_test = y_test.reshape(ntest, -1)
-    y_test = torch.from_numpy(y_test).cuda()
+    y_test = torch.from_numpy(y_test)
 
     # x_normalizer = UnitGaussianNormalizer(x_train)
     # y_normalizer = UnitGaussianNormalizer(y_train)
@@ -255,29 +255,33 @@ def main():
     y_normalizer = UnitTransformer(y_train)
     # x_normalizer = IdentityTransformer(x_train)
     # y_normalizer = IdentityTransformer(y_train)
-    x_normalizer.cuda()
-    y_normalizer.cuda()
+
 
     x_train = x_normalizer.encode(x_train)
     x_test = x_normalizer.encode(x_test)
-
     y_train = y_normalizer.encode(y_train)
+    
+    x_normalizer.cuda()
+    y_normalizer.cuda()
 
     x = np.linspace(0, 1, s)
     y = np.linspace(0, 1, s)
     x, y = np.meshgrid(x, y)
     pos = np.c_[x.ravel(), y.ravel()]
-    pos = torch.tensor(pos, dtype=torch.float).cuda().unsqueeze(0)
+    pos = torch.tensor(pos, dtype=torch.float).unsqueeze(0)
+    #pos = pos.repeat(args.batch_size, 1, 1)
     pos_train = pos.repeat(ntrain, 1, 1)
     pos_test = pos.repeat(ntest, 1, 1)
 
     print("Dataloading is over.")
 
+    
     train_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(pos_train, x_train, y_train),
                                                batch_size=args.batch_size, shuffle=True)
     test_loader = torch.utils.data.DataLoader(torch.utils.data.TensorDataset(pos_test, x_test, y_test),
                                               batch_size=args.batch_size, shuffle=False)
 
+    
     if args.model == 'FNO':
         from fno_hzk import FNO2d
         from fourier_neural_operator.Adam import Adam
@@ -309,13 +313,14 @@ def main():
                                                     steps_per_epoch=len(train_loader))
     myloss = TestLoss(size_average=False)
 
-
     for ep in range(epochs):
 
         model.train()
         train_loss = 0
 
-        for x, fx, y in train_loader:
+        for  x, fx, y in train_loader:
+
+            x, fx , y  = x.cuda() ,fx.cuda(), y.cuda()
             optimizer.zero_grad()
 
             out = model(x, fx.unsqueeze(-1)).squeeze(-1)    #B, N , 2, fx: B, N, y: B, N
@@ -339,7 +344,8 @@ def main():
         testloss = TestLoss(size_average=False)
         rel_err = 0.0
         with torch.no_grad():
-            for x, fx, y in test_loader:
+            for  x, fx, y in test_loader:
+                x, fx, y = x.cuda(), fx.cuda(), y.cuda()
                 out = model(x, fx.unsqueeze(-1)).squeeze(-1)
                 out = y_normalizer.decode(out)
 
